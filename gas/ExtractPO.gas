@@ -1,0 +1,156 @@
+function updatePO2026_FromMonitoring() {
+  const sourceSpreadsheetId = '1xb76Hf1uV600UyCIuev1iBupolLWR9V2KVx9FffK3SU';
+  const sourceSheetName = 'Data List';
+  const targetSheetName = 'PO 2026';
+
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const targetSheet = ss.getSheetByName(targetSheetName);
+
+  const columnMapping = {
+    'DATE PREPARED':'DATE PREPARED (PO)',
+    'CAF NUMBER': 'CAF NO.',
+    'PO. NO.': 'PO NO.',
+    'DESCRIPTION/ PARTICULARS': 'PROJECT TITLE',
+    'AMOUNT': 'PO TOTAL COST',
+    'PR NO.': 'PR NO.',
+    'AREA': 'END-USER',
+    'SUPPLIER': 'SUPPLIER',
+    'METHOD': 'PROCUREMENT METHOD PO',
+    'BID NO': 'PROJECT ID',
+    'PHILGEPS NO.': 'PHILGEPS REFERENCE NO.',
+    'FUND SOURCE': 'SOURCE OF FUNDS'
+  };
+
+  const getColIndex = (header, name) =>
+    header.findIndex(h => h && h.toString().trim().toUpperCase() === name.toUpperCase());
+
+  /* ---------- LOAD SOURCE ---------- */
+  const sourceSheet = SpreadsheetApp
+    .openById(sourceSpreadsheetId)
+    .getSheetByName(sourceSheetName);
+
+  const sourceData = sourceSheet.getDataRange().getValues();
+  const sourceHeader = sourceData[0];
+  const sourceRows = sourceData.slice(1);
+
+  const sourcePoCol = getColIndex(sourceHeader, 'PO NO.');
+  const sourceStatusCol = getColIndex(sourceHeader, 'STATUS');
+
+  /* ---------- LOAD TARGET ---------- */
+  const targetData = targetSheet.getDataRange().getValues();
+  const targetHeader = targetData[0];
+  const targetRows = targetData.slice(1);
+
+  const targetPoCol = getColIndex(targetHeader, 'PO. NO.');
+
+  /* ---------- BUILD TARGET PO SET ---------- */
+  const existingTargetPOs = new Set(
+    targetRows
+      .map(r => r[targetPoCol])
+      .filter(v => v)
+      .map(v => v.toString().trim().toUpperCase())
+  );
+
+  /* ---------- GROUP SOURCE BY PO ---------- */
+  const sourceByPO = new Map();
+
+  sourceRows.forEach(row => {
+    const status = row[sourceStatusCol]?.toString().trim();
+    const poRaw = row[sourcePoCol];
+    if (!poRaw || status !== 'Purchase Order') return;
+
+    const poKey = poRaw.toString().trim().toUpperCase();
+    if (!sourceByPO.has(poKey)) sourceByPO.set(poKey, []);
+    sourceByPO.get(poKey).push(row);
+  });
+
+  /* ---------- APPEND NEW POs ---------- */
+  const rowsToAppend = [];
+  let appendCount = 0;
+
+  sourceByPO.forEach((rows, poKey) => {
+    if (existingTargetPOs.has(poKey)) return;
+
+    const newRow = Array(targetHeader.length).fill('');
+
+    for (const targetColName in columnMapping) {
+      const sourceColName = columnMapping[targetColName];
+      const tCol = getColIndex(targetHeader, targetColName);
+      const sCol = getColIndex(sourceHeader, sourceColName);
+      if (tCol === -1 || sCol === -1) continue;
+
+      if (targetColName === 'AMOUNT') {
+        newRow[tCol] = rows.reduce(
+          (sum, r) => sum + (parseFloat(r[sCol]) || 0),
+          0
+        );
+      } else {
+        const values = [...new Set(rows.map(r => r[sCol]).filter(v => v))];
+        newRow[tCol] = values.join(', ');
+      }
+    }
+
+    rowsToAppend.push(newRow);
+    appendCount++;
+  });
+
+  if (rowsToAppend.length) {
+    targetSheet
+      .getRange(targetSheet.getLastRow() + 1, 1, rowsToAppend.length, targetHeader.length)
+      .setValues(rowsToAppend);
+  }
+
+  /* ---------- UPDATE EXISTING TARGET ROWS ---------- */
+  let updateCount = 0;
+
+  targetRows.forEach((targetRow, i) => {
+    const poRaw = targetRow[targetPoCol];
+    if (!poRaw) return;
+
+    const poKey = poRaw.toString().trim().toUpperCase();
+    if (!sourceByPO.has(poKey)) return;
+
+    const sourceGroup = sourceByPO.get(poKey);
+    let updated = false;
+
+    for (const targetColName in columnMapping) {
+      const sourceColName = columnMapping[targetColName];
+      const tCol = getColIndex(targetHeader, targetColName);
+      const sCol = getColIndex(sourceHeader, sourceColName);
+      if (tCol === -1 || sCol === -1) continue;
+
+      let newValue = '';
+      if (targetColName === 'AMOUNT') {
+        newValue = sourceGroup.reduce(
+          (sum, r) => sum + (parseFloat(r[sCol]) || 0),
+          0
+        );
+      } else {
+        const values = [...new Set(sourceGroup.map(r => r[sCol]).filter(v => v))];
+        newValue = values.join(', ');
+      }
+
+      if (targetRow[tCol] !== newValue) {
+        targetRow[tCol] = newValue;
+        updated = true;
+      }
+    }
+
+    if (updated) {
+      targetSheet
+        .getRange(i + 2, 1, 1, targetRow.length)
+        .setValues([targetRow]);
+      updateCount++;
+    }
+  });
+
+  /* ---------- LOGGING ---------- */
+  Logger.log(`Rows appended successfully: ${appendCount}`);
+  Logger.log(`Rows updated successfully: ${updateCount}`);
+
+  if (appendCount === 0) {
+    Logger.log('No new POs to append.');
+  }
+
+  SpreadsheetApp.flush();
+}
