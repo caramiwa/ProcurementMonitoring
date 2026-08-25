@@ -1,4 +1,4 @@
-function updatePO2026_FromAPP() {
+function updatePO_FromDataList() {
   const sourceSpreadsheetId = '1xb76Hf1uV600UyCIuev1iBupolLWR9V2KVx9FffK3SU';
   const sourceSheetName = 'Data List';
   const targetSheetName = 'PO 2026';
@@ -7,12 +7,12 @@ function updatePO2026_FromAPP() {
   const targetSheet = ss.getSheetByName(targetSheetName);
   if (!targetSheet) throw new Error(`Target sheet not found: ${targetSheetName}`);
 
-  // TARGET PO 2026 → SOURCE Data List
+  // TARGET PO MASTER 2026 ← SOURCE Data List
+  // One record per unique PO. ITEM DESCRIPTION is intentionally excluded.
   const columnMapping = {
     'DATE PREPARED': 'DATE PREPARED (PO)',
     'CAF NO.': 'CAF NO.',
     'PO. NO.': 'PO NO.',
-    'ITEM DESCIRPTION': 'ITEM DESCRIPTION',
     'PROJECT TITLE': 'PROJECT TITLE',
     'AMOUNT': 'PO TOTAL COST',
     'PR NO.': 'PR NO.',
@@ -21,7 +21,8 @@ function updatePO2026_FromAPP() {
     'METHOD': 'PROCUREMENT METHOD PO',
     'PROJECT ID': 'PROJECT ID',
     'PHILGEPS REFERENCE NO.': 'PHILGEPS REFERENCE NO.',
-    'FUND SOURCE': 'SOURCE OF FUNDS'
+    'FUND SOURCE': 'SOURCE OF FUNDS',
+    'CATEGORY': 'CATEGORY'
   };
 
   const getColIndex = (headers, name) =>
@@ -39,7 +40,7 @@ function updatePO2026_FromAPP() {
   const sourceHeader = sourceData[0];
   const sourceRows = sourceData.slice(1);
   const targetData = targetSheet.getDataRange().getValues();
-  if (!targetData.length) throw new Error('PO 2026 has no header row.');
+  if (!targetData.length) throw new Error('PO Master 2026 has no header row.');
 
   const targetHeader = targetData[0];
   const targetRows = targetData.slice(1);
@@ -48,7 +49,7 @@ function updatePO2026_FromAPP() {
   const targetPoCol = getColIndex(targetHeader, 'PO. NO.');
 
   if (sourcePoCol === -1) throw new Error('Data List: PO NO. column was not found.');
-  if (targetPoCol === -1) throw new Error('PO 2026: PO. NO. column was not found.');
+  if (targetPoCol === -1) throw new Error('PO Master 2026: PO. NO. column was not found.');
 
   const mappedColumns = Object.entries(columnMapping).map(([targetColName, sourceColName]) => ({
     targetColName,
@@ -61,58 +62,72 @@ function updatePO2026_FromAPP() {
   const missingTarget = mappedColumns.filter(m => m.targetIndex === -1).map(m => m.targetColName);
 
   if (missingSource.length) throw new Error(`Data List missing source columns: ${missingSource.join(', ')}`);
-  if (missingTarget.length) throw new Error(`PO 2026 missing target columns: ${missingTarget.join(', ')}`);
+  if (missingTarget.length) throw new Error(`PO Master 2026 missing target columns: ${missingTarget.join(', ')}`);
 
-  // Preserve every source row that has a PO NO. Do NOT group or aggregate by PO.
-  const sourceRowsWithPO = sourceRows.filter(row => {
-    const po = row[sourcePoCol];
-    return po !== '' && po != null && String(po).trim() !== '';
+  // Group source rows by PO. Every item row belonging to the same PO contributes to one master record.
+  const poGroups = new Map();
+  sourceRows.forEach(row => {
+    const poRaw = row[sourcePoCol];
+    if (poRaw === '' || poRaw == null || String(poRaw).trim() === '') return;
+
+    const poKey = String(poRaw).trim().toUpperCase();
+    if (!poGroups.has(poKey)) poGroups.set(poKey, []);
+    poGroups.get(poKey).push(row);
   });
 
-  const sourceRowsWithoutPO = sourceRows.length - sourceRowsWithPO.length;
-
-  // Build a target record for every source item row.
-  const rowsToWrite = sourceRowsWithPO.map(sourceRow => {
+  // Build one master row per PO.
+  // AMOUNT is intentionally SUMMED across all Data List item rows for the PO.
+  const buildMasterRow = rows => {
     const targetRow = Array(targetHeader.length).fill('');
 
-    mappedColumns.forEach(({sourceIndex, targetIndex}) => {
-      targetRow[targetIndex] = sourceRow[sourceIndex];
+    mappedColumns.forEach(({targetColName, sourceIndex, targetIndex}) => {
+      if (targetColName === 'AMOUNT') {
+        targetRow[targetIndex] = rows.reduce((sum, row) => {
+          const value = row[sourceIndex];
+          if (typeof value === 'number') return sum + value;
+
+          const cleaned = String(value ?? '').replace(/[^0-9.-]/g, '');
+          return sum + (cleaned ? parseFloat(cleaned) || 0 : 0);
+        }, 0);
+      } else {
+        // PO-level fields should normally have one value. If multiple distinct values
+        // occur, retain all distinct values rather than silently discarding information.
+        const uniqueValues = [...new Set(
+          rows
+            .map(row => row[sourceIndex])
+            .filter(value => value !== '' && value != null)
+            .map(value => String(value).trim())
+        )];
+
+        targetRow[targetIndex] = uniqueValues.join(', ');
+      }
     });
 
     return targetRow;
-  });
+  };
 
-  // Existing target rows are matched by the combination of PO NO. + ITEM DESCRIPTION.
-  // This allows multiple items under the same PO to remain separate records.
-  const targetRowByKey = new Map();
+  // Index existing PO Master records by PO NO. so the script can be safely rerun.
+  const targetRowByPO = new Map();
   targetRows.forEach((row, i) => {
-    const po = row[targetPoCol];
-    const itemCol = getColIndex(targetHeader, 'ITEM DESCRIPTION');
-    const item = itemCol === -1 ? '' : row[itemCol];
-
-    if (po !== '' && po != null && String(po).trim() !== '') {
-      const key = `${String(po).trim().toUpperCase()}||${String(item ?? '').trim().toUpperCase()}`;
-      if (!targetRowByKey.has(key)) targetRowByKey.set(key, i + 2);
-    }
+    const poRaw = row[targetPoCol];
+    if (poRaw === '' || poRaw == null || String(poRaw).trim() === '') return;
+    targetRowByPO.set(String(poRaw).trim().toUpperCase(), i + 2);
   });
 
-  const itemTargetCol = getColIndex(targetHeader, 'ITEM DESCRIPTION');
   const rowsToAppend = [];
   let updateCount = 0;
 
-  rowsToWrite.forEach(sourceMappedRow => {
-    const po = sourceMappedRow[targetPoCol];
-    const item = itemTargetCol === -1 ? '' : sourceMappedRow[itemTargetCol];
-    const key = `${String(po).trim().toUpperCase()}||${String(item ?? '').trim().toUpperCase()}`;
+  poGroups.forEach((rows, poKey) => {
+    const masterRow = buildMasterRow(rows);
 
-    if (targetRowByKey.has(key)) {
-      const targetRowNumber = targetRowByKey.get(key);
+    if (targetRowByPO.has(poKey)) {
+      const targetRowNumber = targetRowByPO.get(poKey);
       const currentRow = targetSheet.getRange(targetRowNumber, 1, 1, targetHeader.length).getValues()[0];
       let changed = false;
 
       mappedColumns.forEach(({targetIndex}) => {
-        if (String(currentRow[targetIndex]) !== String(sourceMappedRow[targetIndex])) {
-          currentRow[targetIndex] = sourceMappedRow[targetIndex];
+        if (String(currentRow[targetIndex]) !== String(masterRow[targetIndex])) {
+          currentRow[targetIndex] = masterRow[targetIndex];
           changed = true;
         }
       });
@@ -122,11 +137,11 @@ function updatePO2026_FromAPP() {
         updateCount++;
       }
     } else {
-      rowsToAppend.push(sourceMappedRow);
+      rowsToAppend.push(masterRow);
     }
   });
 
-  // Fill existing blank rows first. We do not copy or alter formatting.
+  // Fill existing blank rows first. No formatting is copied or changed.
   const availableRows = [];
   for (let i = 0; i < targetRows.length; i++) {
     const poValue = targetRows[i][targetPoCol];
@@ -149,13 +164,14 @@ function updatePO2026_FromAPP() {
     targetSheet.getRange(availableRows[index], 1, 1, targetHeader.length).setValues([rowData]);
   });
 
-  Logger.log('Data List → PO 2026 line-item extraction complete.');
+  Logger.log('Data List → PO Master 2026 extraction complete.');
   Logger.log(`Source Data List rows: ${sourceRows.length}`);
-  Logger.log(`Source rows with PO NO.: ${sourceRowsWithPO.length}`);
-  Logger.log(`Source rows without PO NO. (skipped): ${sourceRowsWithoutPO}`);
+  Logger.log(`Unique POs found: ${poGroups.size}`);
   Logger.log(`Rows appended successfully: ${rowsToAppend.length}`);
   Logger.log(`Rows updated successfully: ${updateCount}`);
-  Logger.log('Each Data List row is preserved as a separate PO 2026 item record; no grouping or amount aggregation is performed.');
+  Logger.log('ITEM DESCRIPTION is excluded from PO Master 2026.');
+  Logger.log('PO TOTAL COST is summed across all Data List rows belonging to each PO.');
 
   SpreadsheetApp.flush();
 }
+
