@@ -5,14 +5,13 @@ function updatePO2026_FromAPP() {
 
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   const targetSheet = ss.getSheetByName(targetSheetName);
-
   if (!targetSheet) throw new Error(`Target sheet not found: ${targetSheetName}`);
 
-  // SOURCE APP 2026 → TARGET PO 2026
+  // TARGET PO 2026 → SOURCE APP 2026
   const columnMapping = {
     'DATE PREPARED': 'DATE PREPARED (PO)',
     'CAF NO.': 'CAF NO.',
-    'PO NO.': 'PO NO.',
+    'PO. NO.': 'PO NO.',
     'ITEM DESCIRPTION': 'ITEM DESCRIPTION',
     'PROJECT TITLE': 'PROJECT TITLE',
     'AMOUNT': 'PO TOTAL COST',
@@ -28,10 +27,7 @@ function updatePO2026_FromAPP() {
   const getColIndex = (headers, name) =>
     headers.findIndex(h => h != null && String(h).trim().toUpperCase() === name.trim().toUpperCase());
 
-  const sourceSheet = SpreadsheetApp
-    .openById(sourceSpreadsheetId)
-    .getSheetByName(sourceSheetName);
-
+  const sourceSheet = SpreadsheetApp.openById(sourceSpreadsheetId).getSheetByName(sourceSheetName);
   if (!sourceSheet) throw new Error(`Source sheet not found: ${sourceSheetName}`);
 
   const sourceData = sourceSheet.getDataRange().getValues();
@@ -42,54 +38,41 @@ function updatePO2026_FromAPP() {
 
   const sourceHeader = sourceData[0];
   const sourceRows = sourceData.slice(1);
-
-  const sourcePoCol = getColIndex(sourceHeader, 'PO NO.');
-  if (sourcePoCol === -1) throw new Error('APP 2026: PO NO. column was not found.');
-
   const targetData = targetSheet.getDataRange().getValues();
-  if (targetData.length === 0) throw new Error('PO 2026 has no header row.');
+  if (!targetData.length) throw new Error('PO 2026 has no header row.');
 
   const targetHeader = targetData[0];
   const targetRows = targetData.slice(1);
 
-  const targetPoCol = getColIndex(targetHeader, 'PO NO.');
-  if (targetPoCol === -1) throw new Error('PO 2026: PO NO. column was not found.');
+  const sourcePoCol = getColIndex(sourceHeader, 'PO NO.');
+  const targetPoCol = getColIndex(targetHeader, 'PO. NO.');
 
-  // Build source column indexes once.
-  const mappedColumns = Object.entries(columnMapping)
-    .map(([sourceColName, targetColName]) => ({
-      sourceColName,
-      targetColName,
-      sourceIndex: getColIndex(sourceHeader, sourceColName),
-      targetIndex: getColIndex(targetHeader, targetColName)
-    }))
-    .filter(m => m.sourceIndex !== -1 && m.targetIndex !== -1);
+  if (sourcePoCol === -1) throw new Error('APP 2026: PO NO. column was not found.');
+  if (targetPoCol === -1) throw new Error('PO 2026: PO. NO. column was not found.');
 
-  const missingSource = Object.keys(columnMapping)
-    .filter(name => getColIndex(sourceHeader, name) === -1);
-  const missingTarget = Object.values(columnMapping)
-    .filter(name => getColIndex(targetHeader, name) === -1);
+  const mappedColumns = Object.entries(columnMapping).map(([targetColName, sourceColName]) => ({
+    targetColName,
+    sourceColName,
+    targetIndex: getColIndex(targetHeader, targetColName),
+    sourceIndex: getColIndex(sourceHeader, sourceColName)
+  }));
 
-  if (missingSource.length) {
-    throw new Error(`APP 2026 missing source columns: ${missingSource.join(', ')}`);
-  }
-  if (missingTarget.length) {
-    throw new Error(`PO 2026 missing target columns: ${missingTarget.join(', ')}`);
-  }
+  const missingSource = mappedColumns.filter(m => m.sourceIndex === -1).map(m => m.sourceColName);
+  const missingTarget = mappedColumns.filter(m => m.targetIndex === -1).map(m => m.targetColName);
 
-  // Group APP rows by PO. A PO may occupy multiple APP rows.
+  if (missingSource.length) throw new Error(`APP 2026 missing source columns: ${missingSource.join(', ')}`);
+  if (missingTarget.length) throw new Error(`PO 2026 missing target columns: ${missingTarget.join(', ')}`);
+
+  // Group APP rows by PO. Multiple APP rows can belong to one PO.
   const sourceByPO = new Map();
-
   sourceRows.forEach(row => {
     const poRaw = row[sourcePoCol];
     if (poRaw === '' || poRaw == null) return;
-
     const poKey = String(poRaw).trim().toUpperCase();
     if (!sourceByPO.has(poKey)) sourceByPO.set(poKey, []);
     sourceByPO.get(poKey).push(row);
   });
 
-  // Existing PO rows in target.
   const targetRowByPO = new Map();
   targetRows.forEach((row, i) => {
     const poRaw = row[targetPoCol];
@@ -97,16 +80,10 @@ function updatePO2026_FromAPP() {
     targetRowByPO.set(String(poRaw).trim().toUpperCase(), i + 2);
   });
 
-  const rowsToAppend = [];
-  const appendPOKeys = [];
-  let updateCount = 0;
-
-  // Build one PO record from its APP rows.
-  const buildPOValues = rows => {
+  const buildValues = rows => {
     const values = {};
-
-    mappedColumns.forEach(({sourceColName, targetColName, sourceIndex, targetIndex}) => {
-      if (targetColName === 'PO TOTAL COST') {
+    mappedColumns.forEach(({targetColName, sourceIndex, targetIndex}) => {
+      if (targetColName === 'AMOUNT') {
         values[targetIndex] = rows.reduce((sum, row) => {
           const value = row[sourceIndex];
           if (typeof value === 'number') return sum + value;
@@ -114,31 +91,32 @@ function updatePO2026_FromAPP() {
           return sum + (cleaned ? parseFloat(cleaned) || 0 : 0);
         }, 0);
       } else {
-        const uniqueValues = [...new Set(
-          rows
-            .map(row => row[sourceIndex])
+        const valuesUnique = [...new Set(
+          rows.map(row => row[sourceIndex])
             .filter(value => value !== '' && value != null)
             .map(value => String(value).trim())
         )];
-        values[targetIndex] = uniqueValues.join(', ');
+        values[targetIndex] = valuesUnique.join(', ');
       }
     });
-
     return values;
   };
 
+  let updateCount = 0;
+  const rowsToAppend = [];
+
   sourceByPO.forEach((sourceGroup, poKey) => {
-    const values = buildPOValues(sourceGroup);
+    const values = buildValues(sourceGroup);
 
     if (targetRowByPO.has(poKey)) {
       const targetRowNumber = targetRowByPO.get(poKey);
       const currentRow = targetSheet.getRange(targetRowNumber, 1, 1, targetHeader.length).getValues()[0];
       let changed = false;
 
-      Object.entries(values).forEach(([targetIndex, newValue]) => {
-        const index = Number(targetIndex);
-        if (String(currentRow[index]) !== String(newValue)) {
-          currentRow[index] = newValue;
+      Object.entries(values).forEach(([index, newValue]) => {
+        const i = Number(index);
+        if (String(currentRow[i]) !== String(newValue)) {
+          currentRow[i] = newValue;
           changed = true;
         }
       });
@@ -149,23 +127,18 @@ function updatePO2026_FromAPP() {
       }
     } else {
       const newRow = Array(targetHeader.length).fill('');
-      Object.entries(values).forEach(([targetIndex, value]) => {
-        newRow[Number(targetIndex)] = value;
-      });
+      Object.entries(values).forEach(([index, value]) => newRow[Number(index)] = value);
       rowsToAppend.push(newRow);
-      appendPOKeys.push(poKey);
     }
   });
 
   if (rowsToAppend.length) {
-    targetSheet
-      .getRange(targetSheet.getLastRow() + 1, 1, rowsToAppend.length, targetHeader.length)
-      .setValues(rowsToAppend);
+    targetSheet.getRange(targetSheet.getLastRow() + 1, 1, rowsToAppend.length, targetHeader.length).setValues(rowsToAppend);
   }
 
-  Logger.log(`APP 2026 → PO 2026 extraction complete.`);
+  Logger.log('APP 2026 → PO 2026 extraction complete.');
   Logger.log(`Source APP rows: ${sourceRows.length}`);
-  Logger.log(`Unique POs found in APP 2026: ${sourceByPO.size}`);
+  Logger.log(`Unique POs found: ${sourceByPO.size}`);
   Logger.log(`Rows appended successfully: ${rowsToAppend.length}`);
   Logger.log(`Rows updated successfully: ${updateCount}`);
 
