@@ -1,5 +1,5 @@
 function updatePO2026_FromAPP() {
-  const sourceSpreadsheetId = '1xb76Hf1uV600UyCIuev1iBupolLWR9V2KVx9Fff9V2KVx9FffK3SU'.replace('9V2KVx9Fff', '9V2KVx9Fff');
+  const sourceSpreadsheetId = '1xb76Hf1uV600UyCIuev1iBupolLWR9V2KVx9FffK3SU';
   const sourceSheetName = 'Data List';
   const targetSheetName = 'PO 2026';
 
@@ -133,7 +133,7 @@ function updatePO2026_FromAPP() {
       Object.entries(values).forEach(([index, value]) => {
         newRow[Number(index)] = value;
       });
-      rowsToWrite.push({ poKey, row: newRow });
+      rowsToWrite.push(newRow);
     }
   });
 
@@ -148,17 +148,17 @@ function updatePO2026_FromAPP() {
   }
 
   if (rowsToWrite.length > availableRows.length) {
-    const requiredLastRow = 1 + rowsToWrite.length + targetRows.length;
-    targetSheet.insertRowsAfter(targetSheet.getMaxRows(), requiredLastRow - targetSheet.getMaxRows());
-
-    for (let row = targetRows.length + 2; row <= requiredLastRow; row++) {
+    const rowsNeeded = rowsToWrite.length - availableRows.length;
+    targetSheet.insertRowsAfter(targetSheet.getMaxRows(), rowsNeeded);
+    const firstNewRow = targetSheet.getMaxRows() - rowsNeeded + 1;
+    for (let row = firstNewRow; row <= targetSheet.getMaxRows(); row++) {
       availableRows.push(row);
     }
   }
 
-  rowsToWrite.forEach((item, index) => {
+  rowsToWrite.forEach((rowData, index) => {
     const rowNumber = availableRows[index];
-    targetSheet.getRange(rowNumber, 1, 1, targetHeader.length).setValues([item.row]);
+    targetSheet.getRange(rowNumber, 1, 1, targetHeader.length).setValues([rowData]);
   });
 
   Logger.log('Data List → PO 2026 extraction complete.');
