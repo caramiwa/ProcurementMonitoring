@@ -12,7 +12,7 @@ function updatePOMaster_FromAPP() {
     'DATE PREPARED': 'DATE PREPARED (PO)',
     'CAF NO.': 'CAF NO.',
     'PO. NO.': 'PO NO.',
-    'ITEM DESCIRPTION': 'ITEM DESCRIPTION',
+    'ITEM DESCRIPTION': 'ITEM DESCRIPTION',
     'PROJECT TITLE': 'PROJECT TITLE',
     'AMOUNT': 'PO TOTAL COST',
     'PR NO.': 'PR NO.',
