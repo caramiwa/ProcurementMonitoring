@@ -1,5 +1,5 @@
 function updatePO2026_FromAPP() {
-  const sourceSpreadsheetId = '1xb76Hf1uV600UyCIuev1iBupolLWR9V2KVx9FffK3SU';
+  const sourceSpreadsheetId = '1xb76Hf1uV600UyCIuev1iBupolLWR9V2KVx9Fff9V2KVx9FffK3SU'.replace('9V2KVx9Fff', '9V2KVx9Fff');
   const sourceSheetName = 'Data List';
   const targetSheetName = 'PO 2026';
 
@@ -73,6 +73,7 @@ function updatePO2026_FromAPP() {
     sourceByPO.get(poKey).push(row);
   });
 
+  // Find existing PO rows in the target.
   const targetRowByPO = new Map();
   targetRows.forEach((row, i) => {
     const poRaw = row[targetPoCol];
@@ -82,6 +83,7 @@ function updatePO2026_FromAPP() {
 
   const buildValues = rows => {
     const values = {};
+
     mappedColumns.forEach(({targetColName, sourceIndex, targetIndex}) => {
       if (targetColName === 'AMOUNT') {
         values[targetIndex] = rows.reduce((sum, row) => {
@@ -91,19 +93,20 @@ function updatePO2026_FromAPP() {
           return sum + (cleaned ? parseFloat(cleaned) || 0 : 0);
         }, 0);
       } else {
-        const valuesUnique = [...new Set(
+        const uniqueValues = [...new Set(
           rows.map(row => row[sourceIndex])
             .filter(value => value !== '' && value != null)
             .map(value => String(value).trim())
         )];
-        values[targetIndex] = valuesUnique.join(', ');
+        values[targetIndex] = uniqueValues.join(', ');
       }
     });
+
     return values;
   };
 
   let updateCount = 0;
-  const rowsToAppend = [];
+  const rowsToWrite = [];
 
   sourceByPO.forEach((sourceGroup, poKey) => {
     const values = buildValues(sourceGroup);
@@ -127,31 +130,41 @@ function updatePO2026_FromAPP() {
       }
     } else {
       const newRow = Array(targetHeader.length).fill('');
-      Object.entries(values).forEach(([index, value]) => newRow[Number(index)] = value);
-      rowsToAppend.push(newRow);
+      Object.entries(values).forEach(([index, value]) => {
+        newRow[Number(index)] = value;
+      });
+      rowsToWrite.push({ poKey, row: newRow });
     }
   });
 
-  const firstNewRow = targetSheet.getLastRow() + 1;
-  if (rowsToAppend.length) {
-    targetSheet.getRange(firstNewRow, 1, rowsToAppend.length, targetHeader.length).setValues(rowsToAppend);
-
-    // Preserve the formatting of the existing PO rows for newly appended records.
-    if (firstNewRow > 2) {
-      targetSheet
-        .getRange(firstNewRow - 1, 1, 1, targetHeader.length)
-        .copyTo(
-          targetSheet.getRange(firstNewRow, 1, rowsToAppend.length, targetHeader.length),
-          SpreadsheetApp.CopyPasteType.PASTE_FORMAT,
-          false
-        );
+  // Write new POs into the first available blank PO rows.
+  // We deliberately do not copy or set formatting; this script writes data only.
+  const availableRows = [];
+  for (let i = 0; i < targetRows.length; i++) {
+    const poValue = targetRows[i][targetPoCol];
+    if (poValue === '' || poValue == null) {
+      availableRows.push(i + 2);
     }
   }
+
+  if (rowsToWrite.length > availableRows.length) {
+    const requiredLastRow = 1 + rowsToWrite.length + targetRows.length;
+    targetSheet.insertRowsAfter(targetSheet.getMaxRows(), requiredLastRow - targetSheet.getMaxRows());
+
+    for (let row = targetRows.length + 2; row <= requiredLastRow; row++) {
+      availableRows.push(row);
+    }
+  }
+
+  rowsToWrite.forEach((item, index) => {
+    const rowNumber = availableRows[index];
+    targetSheet.getRange(rowNumber, 1, 1, targetHeader.length).setValues([item.row]);
+  });
 
   Logger.log('Data List → PO 2026 extraction complete.');
   Logger.log(`Source Data List rows: ${sourceRows.length}`);
   Logger.log(`Unique POs found: ${sourceByPO.size}`);
-  Logger.log(`Rows appended successfully: ${rowsToAppend.length}`);
+  Logger.log(`Rows written to available blank rows: ${rowsToWrite.length}`);
   Logger.log(`Rows updated successfully: ${updateCount}`);
 
   SpreadsheetApp.flush();
