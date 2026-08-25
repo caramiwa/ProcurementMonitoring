@@ -63,63 +63,56 @@ function updatePO2026_FromAPP() {
   if (missingSource.length) throw new Error(`Data List missing source columns: ${missingSource.join(', ')}`);
   if (missingTarget.length) throw new Error(`PO 2026 missing target columns: ${missingTarget.join(', ')}`);
 
-  // Group source rows by PO. Multiple source rows can belong to one PO.
-  const sourceByPO = new Map();
-  sourceRows.forEach(row => {
-    const poRaw = row[sourcePoCol];
-    if (poRaw === '' || poRaw == null) return;
-    const poKey = String(poRaw).trim().toUpperCase();
-    if (!sourceByPO.has(poKey)) sourceByPO.set(poKey, []);
-    sourceByPO.get(poKey).push(row);
+  // Preserve every source row that has a PO NO. Do NOT group or aggregate by PO.
+  const sourceRowsWithPO = sourceRows.filter(row => {
+    const po = row[sourcePoCol];
+    return po !== '' && po != null && String(po).trim() !== '';
   });
 
-  // Find existing PO rows in the target.
-  const targetRowByPO = new Map();
-  targetRows.forEach((row, i) => {
-    const poRaw = row[targetPoCol];
-    if (poRaw === '' || poRaw == null) return;
-    targetRowByPO.set(String(poRaw).trim().toUpperCase(), i + 2);
-  });
+  const sourceRowsWithoutPO = sourceRows.length - sourceRowsWithPO.length;
 
-  const buildValues = rows => {
-    const values = {};
+  // Build a target record for every source item row.
+  const rowsToWrite = sourceRowsWithPO.map(sourceRow => {
+    const targetRow = Array(targetHeader.length).fill('');
 
-    mappedColumns.forEach(({targetColName, sourceIndex, targetIndex}) => {
-      if (targetColName === 'AMOUNT') {
-        values[targetIndex] = rows.reduce((sum, row) => {
-          const value = row[sourceIndex];
-          if (typeof value === 'number') return sum + value;
-          const cleaned = String(value ?? '').replace(/[^0-9.-]/g, '');
-          return sum + (cleaned ? parseFloat(cleaned) || 0 : 0);
-        }, 0);
-      } else {
-        const uniqueValues = [...new Set(
-          rows.map(row => row[sourceIndex])
-            .filter(value => value !== '' && value != null)
-            .map(value => String(value).trim())
-        )];
-        values[targetIndex] = uniqueValues.join(', ');
-      }
+    mappedColumns.forEach(({sourceIndex, targetIndex}) => {
+      targetRow[targetIndex] = sourceRow[sourceIndex];
     });
 
-    return values;
-  };
+    return targetRow;
+  });
 
+  // Existing target rows are matched by the combination of PO NO. + ITEM DESCRIPTION.
+  // This allows multiple items under the same PO to remain separate records.
+  const targetRowByKey = new Map();
+  targetRows.forEach((row, i) => {
+    const po = row[targetPoCol];
+    const itemCol = getColIndex(targetHeader, 'ITEM DESCRIPTION');
+    const item = itemCol === -1 ? '' : row[itemCol];
+
+    if (po !== '' && po != null && String(po).trim() !== '') {
+      const key = `${String(po).trim().toUpperCase()}||${String(item ?? '').trim().toUpperCase()}`;
+      if (!targetRowByKey.has(key)) targetRowByKey.set(key, i + 2);
+    }
+  });
+
+  const itemTargetCol = getColIndex(targetHeader, 'ITEM DESCRIPTION');
+  const rowsToAppend = [];
   let updateCount = 0;
-  const rowsToWrite = [];
 
-  sourceByPO.forEach((sourceGroup, poKey) => {
-    const values = buildValues(sourceGroup);
+  rowsToWrite.forEach(sourceMappedRow => {
+    const po = sourceMappedRow[targetPoCol];
+    const item = itemTargetCol === -1 ? '' : sourceMappedRow[itemTargetCol];
+    const key = `${String(po).trim().toUpperCase()}||${String(item ?? '').trim().toUpperCase()}`;
 
-    if (targetRowByPO.has(poKey)) {
-      const targetRowNumber = targetRowByPO.get(poKey);
+    if (targetRowByKey.has(key)) {
+      const targetRowNumber = targetRowByKey.get(key);
       const currentRow = targetSheet.getRange(targetRowNumber, 1, 1, targetHeader.length).getValues()[0];
       let changed = false;
 
-      Object.entries(values).forEach(([index, newValue]) => {
-        const i = Number(index);
-        if (String(currentRow[i]) !== String(newValue)) {
-          currentRow[i] = newValue;
+      mappedColumns.forEach(({targetIndex}) => {
+        if (String(currentRow[targetIndex]) !== String(sourceMappedRow[targetIndex])) {
+          currentRow[targetIndex] = sourceMappedRow[targetIndex];
           changed = true;
         }
       });
@@ -129,43 +122,40 @@ function updatePO2026_FromAPP() {
         updateCount++;
       }
     } else {
-      const newRow = Array(targetHeader.length).fill('');
-      Object.entries(values).forEach(([index, value]) => {
-        newRow[Number(index)] = value;
-      });
-      rowsToWrite.push(newRow);
+      rowsToAppend.push(sourceMappedRow);
     }
   });
 
-  // Write new POs into the first available blank PO rows.
-  // We deliberately do not copy or set formatting; this script writes data only.
+  // Fill existing blank rows first. We do not copy or alter formatting.
   const availableRows = [];
   for (let i = 0; i < targetRows.length; i++) {
     const poValue = targetRows[i][targetPoCol];
-    if (poValue === '' || poValue == null) {
+    if (poValue === '' || poValue == null || String(poValue).trim() === '') {
       availableRows.push(i + 2);
     }
   }
 
-  if (rowsToWrite.length > availableRows.length) {
-    const rowsNeeded = rowsToWrite.length - availableRows.length;
-    targetSheet.insertRowsAfter(targetSheet.getMaxRows(), rowsNeeded);
-    const firstNewRow = targetSheet.getMaxRows() - rowsNeeded + 1;
-    for (let row = firstNewRow; row <= targetSheet.getMaxRows(); row++) {
+  if (rowsToAppend.length > availableRows.length) {
+    const rowsNeeded = rowsToAppend.length - availableRows.length;
+    const oldMaxRows = targetSheet.getMaxRows();
+    targetSheet.insertRowsAfter(oldMaxRows, rowsNeeded);
+
+    for (let row = oldMaxRows + 1; row <= oldMaxRows + rowsNeeded; row++) {
       availableRows.push(row);
     }
   }
 
-  rowsToWrite.forEach((rowData, index) => {
-    const rowNumber = availableRows[index];
-    targetSheet.getRange(rowNumber, 1, 1, targetHeader.length).setValues([rowData]);
+  rowsToAppend.forEach((rowData, index) => {
+    targetSheet.getRange(availableRows[index], 1, 1, targetHeader.length).setValues([rowData]);
   });
 
-  Logger.log('Data List → PO 2026 extraction complete.');
+  Logger.log('Data List → PO 2026 line-item extraction complete.');
   Logger.log(`Source Data List rows: ${sourceRows.length}`);
-  Logger.log(`Unique POs found: ${sourceByPO.size}`);
-  Logger.log(`Rows written to available blank rows: ${rowsToWrite.length}`);
+  Logger.log(`Source rows with PO NO.: ${sourceRowsWithPO.length}`);
+  Logger.log(`Source rows without PO NO. (skipped): ${sourceRowsWithoutPO}`);
+  Logger.log(`Rows appended successfully: ${rowsToAppend.length}`);
   Logger.log(`Rows updated successfully: ${updateCount}`);
+  Logger.log('Each Data List row is preserved as a separate PO 2026 item record; no grouping or amount aggregation is performed.');
 
   SpreadsheetApp.flush();
 }
