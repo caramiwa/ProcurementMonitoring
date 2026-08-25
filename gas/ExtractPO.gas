@@ -1,13 +1,13 @@
 function updatePO2026_FromAPP() {
   const sourceSpreadsheetId = '1xb76Hf1uV600UyCIuev1iBupolLWR9V2KVx9FffK3SU';
-  const sourceSheetName = 'APP 2026';
+  const sourceSheetName = 'Data List';
   const targetSheetName = 'PO 2026';
 
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   const targetSheet = ss.getSheetByName(targetSheetName);
   if (!targetSheet) throw new Error(`Target sheet not found: ${targetSheetName}`);
 
-  // TARGET PO 2026 → SOURCE APP 2026
+  // TARGET PO 2026 → SOURCE Data List
   const columnMapping = {
     'DATE PREPARED': 'DATE PREPARED (PO)',
     'CAF NO.': 'CAF NO.',
@@ -32,7 +32,7 @@ function updatePO2026_FromAPP() {
 
   const sourceData = sourceSheet.getDataRange().getValues();
   if (sourceData.length < 2) {
-    Logger.log('APP 2026 contains no data rows.');
+    Logger.log('Data List contains no data rows.');
     return;
   }
 
@@ -47,7 +47,7 @@ function updatePO2026_FromAPP() {
   const sourcePoCol = getColIndex(sourceHeader, 'PO NO.');
   const targetPoCol = getColIndex(targetHeader, 'PO. NO.');
 
-  if (sourcePoCol === -1) throw new Error('APP 2026: PO NO. column was not found.');
+  if (sourcePoCol === -1) throw new Error('Data List: PO NO. column was not found.');
   if (targetPoCol === -1) throw new Error('PO 2026: PO. NO. column was not found.');
 
   const mappedColumns = Object.entries(columnMapping).map(([targetColName, sourceColName]) => ({
@@ -60,10 +60,10 @@ function updatePO2026_FromAPP() {
   const missingSource = mappedColumns.filter(m => m.sourceIndex === -1).map(m => m.sourceColName);
   const missingTarget = mappedColumns.filter(m => m.targetIndex === -1).map(m => m.targetColName);
 
-  if (missingSource.length) throw new Error(`APP 2026 missing source columns: ${missingSource.join(', ')}`);
+  if (missingSource.length) throw new Error(`Data List missing source columns: ${missingSource.join(', ')}`);
   if (missingTarget.length) throw new Error(`PO 2026 missing target columns: ${missingTarget.join(', ')}`);
 
-  // Group APP rows by PO. Multiple APP rows can belong to one PO.
+  // Group source rows by PO. Multiple source rows can belong to one PO.
   const sourceByPO = new Map();
   sourceRows.forEach(row => {
     const poRaw = row[sourcePoCol];
@@ -132,12 +132,24 @@ function updatePO2026_FromAPP() {
     }
   });
 
+  const firstNewRow = targetSheet.getLastRow() + 1;
   if (rowsToAppend.length) {
-    targetSheet.getRange(targetSheet.getLastRow() + 1, 1, rowsToAppend.length, targetHeader.length).setValues(rowsToAppend);
+    targetSheet.getRange(firstNewRow, 1, rowsToAppend.length, targetHeader.length).setValues(rowsToAppend);
+
+    // Preserve the formatting of the existing PO rows for newly appended records.
+    if (firstNewRow > 2) {
+      targetSheet
+        .getRange(firstNewRow - 1, 1, 1, targetHeader.length)
+        .copyTo(
+          targetSheet.getRange(firstNewRow, 1, rowsToAppend.length, targetHeader.length),
+          SpreadsheetApp.CopyPasteType.PASTE_FORMAT,
+          false
+        );
+    }
   }
 
-  Logger.log('APP 2026 → PO 2026 extraction complete.');
-  Logger.log(`Source APP rows: ${sourceRows.length}`);
+  Logger.log('Data List → PO 2026 extraction complete.');
+  Logger.log(`Source Data List rows: ${sourceRows.length}`);
   Logger.log(`Unique POs found: ${sourceByPO.size}`);
   Logger.log(`Rows appended successfully: ${rowsToAppend.length}`);
   Logger.log(`Rows updated successfully: ${updateCount}`);
