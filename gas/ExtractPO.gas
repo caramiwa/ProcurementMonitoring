@@ -1,7 +1,7 @@
 function updatePO_FromDataList() {
   const sourceSpreadsheetId = '1xb76Hf1uV600UyCIuev1iBupolLWR9V2KVx9FffK3SU';
   const sourceSheetName = 'Data List';
-  const targetSheetName = 'PO 2026';
+  const targetSheetName = 'Current PO';
 
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   const targetSheet = ss.getSheetByName(targetSheetName);
