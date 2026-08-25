@@ -1,0 +1,176 @@
+function updatePOMaster2026_FromDataList() {
+  const sourceSpreadsheetId = '1xb76Hf1uV600UyCIuev1iBupolLWR9V2KVx9FffK3SU';
+  const sourceSheetName = 'Data List';
+  const targetSheetName = 'PO Master 2026';
+
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const targetSheet = ss.getSheetByName(targetSheetName);
+  if (!targetSheet) throw new Error(`Target sheet not found: ${targetSheetName}`);
+
+  // TARGET PO MASTER 2026 ← SOURCE Data List
+  // One record per unique PO. ITEM DESCRIPTION is intentionally excluded.
+  const columnMapping = {
+    'DATE PREPARED': 'DATE PREPARED (PO)',
+    'CAF NO.': 'CAF NO.',
+    'PO. NO.': 'PO NO.',
+    'PROJECT TITLE': 'PROJECT TITLE',
+    'AMOUNT': 'PO TOTAL COST',
+    'PR NO.': 'PR NO.',
+    'END-USER': 'END-USER',
+    'SUPPLIER': 'SUPPLIER',
+    'METHOD': 'PROCUREMENT METHOD PO',
+    'PROJECT ID': 'PROJECT ID',
+    'PHILGEPS REFERENCE NO.': 'PHILGEPS REFERENCE NO.',
+    'FUND SOURCE': 'SOURCE OF FUNDS',
+    'CATEGORY': 'CATEGORY'
+  };
+
+  const getColIndex = (headers, name) =>
+    headers.findIndex(h => h != null && String(h).trim().toUpperCase() === name.trim().toUpperCase());
+
+  const sourceSheet = SpreadsheetApp.openById(sourceSpreadsheetId).getSheetByName(sourceSheetName);
+  if (!sourceSheet) throw new Error(`Source sheet not found: ${sourceSheetName}`);
+
+  const sourceData = sourceSheet.getDataRange().getValues();
+  if (sourceData.length < 2) {
+    Logger.log('Data List contains no data rows.');
+    return;
+  }
+
+  const sourceHeader = sourceData[0];
+  const sourceRows = sourceData.slice(1);
+  const targetData = targetSheet.getDataRange().getValues();
+  if (!targetData.length) throw new Error('PO Master 2026 has no header row.');
+
+  const targetHeader = targetData[0];
+  const targetRows = targetData.slice(1);
+
+  const sourcePoCol = getColIndex(sourceHeader, 'PO NO.');
+  const targetPoCol = getColIndex(targetHeader, 'PO. NO.');
+
+  if (sourcePoCol === -1) throw new Error('Data List: PO NO. column was not found.');
+  if (targetPoCol === -1) throw new Error('PO Master 2026: PO. NO. column was not found.');
+
+  const mappedColumns = Object.entries(columnMapping).map(([targetColName, sourceColName]) => ({
+    targetColName,
+    sourceColName,
+    targetIndex: getColIndex(targetHeader, targetColName),
+    sourceIndex: getColIndex(sourceHeader, sourceColName)
+  }));
+
+  const missingSource = mappedColumns.filter(m => m.sourceIndex === -1).map(m => m.sourceColName);
+  const missingTarget = mappedColumns.filter(m => m.targetIndex === -1).map(m => m.targetColName);
+
+  if (missingSource.length) throw new Error(`Data List missing source columns: ${missingSource.join(', ')}`);
+  if (missingTarget.length) throw new Error(`PO Master 2026 missing target columns: ${missingTarget.join(', ')}`);
+
+  // Group source rows by PO. Every item row belonging to the same PO contributes to one master record.
+  const poGroups = new Map();
+  sourceRows.forEach(row => {
+    const poRaw = row[sourcePoCol];
+    if (poRaw === '' || poRaw == null || String(poRaw).trim() === '') return;
+
+    const poKey = String(poRaw).trim().toUpperCase();
+    if (!poGroups.has(poKey)) poGroups.set(poKey, []);
+    poGroups.get(poKey).push(row);
+  });
+
+  // Build one master row per PO.
+  // AMOUNT is intentionally SUMMED across all Data List item rows for the PO.
+  const buildMasterRow = rows => {
+    const targetRow = Array(targetHeader.length).fill('');
+
+    mappedColumns.forEach(({targetColName, sourceIndex, targetIndex}) => {
+      if (targetColName === 'AMOUNT') {
+        targetRow[targetIndex] = rows.reduce((sum, row) => {
+          const value = row[sourceIndex];
+          if (typeof value === 'number') return sum + value;
+
+          const cleaned = String(value ?? '').replace(/[^0-9.-]/g, '');
+          return sum + (cleaned ? parseFloat(cleaned) || 0 : 0);
+        }, 0);
+      } else {
+        // PO-level fields should normally have one value. If multiple distinct values
+        // occur, retain all distinct values rather than silently discarding information.
+        const uniqueValues = [...new Set(
+          rows
+            .map(row => row[sourceIndex])
+            .filter(value => value !== '' && value != null)
+            .map(value => String(value).trim())
+        )];
+
+        targetRow[targetIndex] = uniqueValues.join(', ');
+      }
+    });
+
+    return targetRow;
+  };
+
+  // Index existing PO Master records by PO NO. so the script can be safely rerun.
+  const targetRowByPO = new Map();
+  targetRows.forEach((row, i) => {
+    const poRaw = row[targetPoCol];
+    if (poRaw === '' || poRaw == null || String(poRaw).trim() === '') return;
+    targetRowByPO.set(String(poRaw).trim().toUpperCase(), i + 2);
+  });
+
+  const rowsToAppend = [];
+  let updateCount = 0;
+
+  poGroups.forEach((rows, poKey) => {
+    const masterRow = buildMasterRow(rows);
+
+    if (targetRowByPO.has(poKey)) {
+      const targetRowNumber = targetRowByPO.get(poKey);
+      const currentRow = targetSheet.getRange(targetRowNumber, 1, 1, targetHeader.length).getValues()[0];
+      let changed = false;
+
+      mappedColumns.forEach(({targetIndex}) => {
+        if (String(currentRow[targetIndex]) !== String(masterRow[targetIndex])) {
+          currentRow[targetIndex] = masterRow[targetIndex];
+          changed = true;
+        }
+      });
+
+      if (changed) {
+        targetSheet.getRange(targetRowNumber, 1, 1, targetHeader.length).setValues([currentRow]);
+        updateCount++;
+      }
+    } else {
+      rowsToAppend.push(masterRow);
+    }
+  });
+
+  // Fill existing blank rows first. No formatting is copied or changed.
+  const availableRows = [];
+  for (let i = 0; i < targetRows.length; i++) {
+    const poValue = targetRows[i][targetPoCol];
+    if (poValue === '' || poValue == null || String(poValue).trim() === '') {
+      availableRows.push(i + 2);
+    }
+  }
+
+  if (rowsToAppend.length > availableRows.length) {
+    const rowsNeeded = rowsToAppend.length - availableRows.length;
+    const oldMaxRows = targetSheet.getMaxRows();
+    targetSheet.insertRowsAfter(oldMaxRows, rowsNeeded);
+
+    for (let row = oldMaxRows + 1; row <= oldMaxRows + rowsNeeded; row++) {
+      availableRows.push(row);
+    }
+  }
+
+  rowsToAppend.forEach((rowData, index) => {
+    targetSheet.getRange(availableRows[index], 1, 1, targetHeader.length).setValues([rowData]);
+  });
+
+  Logger.log('Data List → PO Master 2026 extraction complete.');
+  Logger.log(`Source Data List rows: ${sourceRows.length}`);
+  Logger.log(`Unique POs found: ${poGroups.size}`);
+  Logger.log(`Rows appended successfully: ${rowsToAppend.length}`);
+  Logger.log(`Rows updated successfully: ${updateCount}`);
+  Logger.log('ITEM DESCRIPTION is excluded from PO Master 2026.');
+  Logger.log('PO TOTAL COST is summed across all Data List rows belonging to each PO.');
+
+  SpreadsheetApp.flush();
+}
