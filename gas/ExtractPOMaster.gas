@@ -7,6 +7,8 @@ function ExtractPOMaster() {
   const targetSheet = ss.getSheetByName(targetSheetName);
   if (!targetSheet) throw new Error(`Target sheet not found: ${targetSheetName}`);
 
+  // TARGET Current PO Master ← SOURCE Data List
+  // Data List is READ ONLY. Nothing is ever written back to it.
   const columnMapping = {
     'DATE PREPARED': 'DATE PREPARED (PO)',
     'CAF NO.': 'CAF NO.',
@@ -29,31 +31,36 @@ function ExtractPOMaster() {
   const getColIndex = (headers, name) =>
     headers.findIndex(h => normalizeKey(h) === normalizeKey(name));
 
+  // Extract only the text inside parentheses for PROJECT ID.
+  // Example: 0006 (LR-01-0006) → LR-01-0006
+  const cleanProjectId = value => {
+    const text = normalize(value);
+    const match = text.match(/\(([^()]*)\)/);
+    return match ? match[1].trim() : text;
+  };
+
   const sourceSheet = SpreadsheetApp.openById(sourceSpreadsheetId).getSheetByName(sourceSheetName);
   if (!sourceSheet) throw new Error(`Source sheet not found: ${sourceSheetName}`);
 
   const sourceData = sourceSheet.getDataRange().getValues();
-  if (sourceData.length < 2) {
-    Logger.log('Data List contains no data rows.');
-    return;
-  }
-
   const targetData = targetSheet.getDataRange().getValues();
+
   if (targetData.length < 1) throw new Error('Current PO Master has no header row.');
 
-  const sourceHeader = sourceData[0];
-  const sourceRows = sourceData.slice(1);
+  const sourceHeader = sourceData.length ? sourceData[0] : [];
+  const sourceRows = sourceData.length > 1 ? sourceData.slice(1) : [];
   const targetHeader = targetData[0];
+  const existingTargetRows = targetData.length > 1 ? targetData.slice(1) : [];
 
   const sourcePoCol = getColIndex(sourceHeader, 'PO NO.');
   const targetPoCol = getColIndex(targetHeader, 'PO. NO.');
-  const targetItemCol = getColIndex(targetHeader, 'ITEM DESCRIPTION');
   const targetIdCol = getColIndex(targetHeader, 'PO ITEM ID');
+  const targetSignatureCol = getColIndex(targetHeader, 'SOURCE ROW SIGNATURE');
 
   if (sourcePoCol === -1) throw new Error('Data List: PO NO. column was not found.');
   if (targetPoCol === -1) throw new Error('Current PO Master: PO. NO. column was not found.');
-  if (targetItemCol === -1) throw new Error('Current PO Master: ITEM DESCRIPTION column was not found.');
   if (targetIdCol === -1) throw new Error('Current PO Master: PO ITEM ID column was not found.');
+  if (targetSignatureCol === -1) throw new Error('Current PO Master: SOURCE ROW SIGNATURE column was not found.');
 
   const mappedColumns = Object.entries(columnMapping).map(([targetColName, sourceColName]) => ({
     targetColName,
@@ -72,36 +79,103 @@ function ExtractPOMaster() {
     throw new Error(`Current PO Master missing target columns: ${missingTarget.join(', ')}`);
   }
 
-  const sourceRowsWithPO = sourceRows.filter(row => normalize(row[sourcePoCol]) !== '');
-  const sourceRowsWithoutPO = sourceRows.length - sourceRowsWithPO.length;
+  const sourceRowsWithPO = [];
+  let sourceRowsWithoutPO = 0;
 
-  // Build detailed output rows entirely in memory.
-  // PO ITEM ID is generated here and is never written back to Data List.
+  sourceRows.forEach((row, index) => {
+    if (normalize(row[sourcePoCol]) === '') {
+      sourceRowsWithoutPO++;
+      return;
+    }
+
+    // Google Sheets row number. This is the identity of the source record for
+    // synchronization; it is stored only in Current PO Master.
+    sourceRowsWithPO.push({
+      row,
+      sourceRowNumber: index + 2
+    });
+  });
+
+  // Existing records are indexed by SOURCE ROW SIGNATURE so that a subsequent
+  // trigger run updates the existing PO ITEM ID instead of creating a duplicate.
+  const existingBySignature = new Map();
+  let maxItemSequence = 0;
+
+  existingTargetRows.forEach(existingRow => {
+    const signature = normalize(existingRow[targetSignatureCol]);
+    const itemId = normalize(existingRow[targetIdCol]);
+
+    if (signature) existingBySignature.set(signature, existingRow);
+
+    // Recover the highest numeric suffix from existing IDs, e.g. PO-001-027.
+    const match = itemId.match(/-(\d+)$/);
+    if (match) maxItemSequence = Math.max(maxItemSequence, Number(match[1]));
+  });
+
+  // If this is the first synchronization after adding SOURCE ROW SIGNATURE,
+  // existing records may not have signatures. Match them by their current row
+  // position so their existing PO ITEM IDs are preserved.
+  const existingByPosition = new Map();
+  existingTargetRows.forEach((existingRow, index) => {
+    const itemId = normalize(existingRow[targetIdCol]);
+    if (itemId) existingByPosition.set(index + 2, existingRow);
+  });
+
   const occurrenceByPO = new Map();
+  const outputRows = [];
+  let updatedCount = 0;
+  let appendedCount = 0;
 
-  const desiredRows = sourceRowsWithPO.map(sourceRow => {
-    const po = normalize(sourceRow[sourcePoCol]);
+  sourceRowsWithPO.forEach(({row, sourceRowNumber}) => {
+    const po = normalize(row[sourcePoCol]);
     const poKey = normalizeKey(po);
+    const signature = `DataList:${sourceRowNumber}`;
+
     const occurrence = (occurrenceByPO.get(poKey) || 0) + 1;
     occurrenceByPO.set(poKey, occurrence);
 
-    const poItemId = `${po}-${String(occurrence).padStart(3, '0')}`;
+    let existingRecord = existingBySignature.get(signature);
+
+    // Initial migration: the old records were created before SOURCE ROW
+    // SIGNATURE existed. Preserve their existing PO ITEM ID by position.
+    if (!existingRecord) {
+      existingRecord = existingByPosition.get(sourceRowNumber);
+    }
+
+    let poItemId = existingRecord ? normalize(existingRecord[targetIdCol]) : '';
+
+    if (poItemId) {
+      updatedCount++;
+    } else {
+      maxItemSequence++;
+      poItemId = `${po}-${String(maxItemSequence).padStart(3, '0')}`;
+      appendedCount++;
+    }
+
     const targetRow = Array(targetHeader.length).fill('');
 
-    mappedColumns.forEach(({sourceIndex, targetIndex}) => {
-      targetRow[targetIndex] = sourceRow[sourceIndex];
+    mappedColumns.forEach(({targetColName, sourceIndex, targetIndex}) => {
+      let value = row[sourceIndex];
+
+      if (targetColName === 'PROJECT ID') {
+        value = cleanProjectId(value);
+      }
+
+      targetRow[targetIndex] = value;
     });
 
     targetRow[targetIdCol] = poItemId;
-    return targetRow;
+    targetRow[targetSignatureCol] = signature;
+
+    outputRows.push(targetRow);
   });
 
-  // Replace the generated data area in one batch.
-  // Data List remains completely untouched.
+  // Write the synchronized output in one batch. Existing PO ITEM IDs are
+  // preserved; changed source values, including PROJECT ID, are refreshed.
   const outputStartRow = 2;
-  const requiredLastRow = outputStartRow + desiredRows.length - 1;
+  const requiredLastRow = outputStartRow + outputRows.length - 1;
 
-  if (requiredLastRow > targetSheet.getMaxRows()) {
+  if (outputRows.length > 0 && requiredLastRow > targetSheet.getMaxRows()) {
     targetSheet.insertRowsAfter(
       targetSheet.getMaxRows(),
       requiredLastRow - targetSheet.getMaxRows()
@@ -113,26 +187,29 @@ function ExtractPOMaster() {
     targetSheet.getRange(2, 1, existingDataRowCount, targetHeader.length).clearContent();
   }
 
-  if (desiredRows.length > 0) {
-    targetSheet.getRange(outputStartRow, 1, desiredRows.length, targetHeader.length)
-      .setValues(desiredRows);
+  if (outputRows.length > 0) {
+    targetSheet.getRange(outputStartRow, 1, outputRows.length, targetHeader.length)
+      .setValues(outputRows);
   }
 
-  // Clear stale generated rows below the current output without touching the header.
-  const rowsToClear = targetSheet.getMaxRows() - requiredLastRow;
-  if (desiredRows.length > 0 && rowsToClear > 0) {
-    targetSheet.getRange(requiredLastRow + 1, 1, rowsToClear, targetHeader.length).clearContent();
+  // Remove stale generated rows if the source now contains fewer PO records.
+  const clearStartRow = outputRows.length + 2;
+  const rowsToClear = targetSheet.getMaxRows() - clearStartRow + 1;
+  if (rowsToClear > 0) {
+    targetSheet.getRange(clearStartRow, 1, rowsToClear, targetHeader.length).clearContent();
   }
 
-  Logger.log('Data List → Current PO Master detailed extraction complete.');
+  Logger.log('Data List → Current PO Master synchronization complete.');
   Logger.log(`Source Data List rows: ${sourceRows.length}`);
   Logger.log(`Source rows with PO NO.: ${sourceRowsWithPO.length}`);
   Logger.log(`Source rows without PO NO. (skipped): ${sourceRowsWithoutPO}`);
-  Logger.log(`Current PO Master rows populated: ${desiredRows.length}`);
-  Logger.log(`PO ITEM IDs generated: ${desiredRows.length}`);
-  Logger.log('ITEM DESCRIPTION and CATEGORY are preserved in Current PO Master.');
-  Logger.log('No grouping or PO TOTAL COST aggregation is performed.');
-  Logger.log('PO ITEM ID is generated only in Current PO Master; Data List is read-only.');
+  Logger.log(`Current PO Master rows synchronized: ${outputRows.length}`);
+  Logger.log(`Existing rows updated: ${updatedCount}`);
+  Logger.log(`New rows appended/generated: ${appendedCount}`);
+  Logger.log('PROJECT ID is normalized to the value inside parentheses.');
+  Logger.log('PO ITEM ID is preserved for existing source rows and generated for new rows.');
+  Logger.log('SOURCE ROW SIGNATURE is stored only in Current PO Master.');
+  Logger.log('Data List remains read-only.');
 
   SpreadsheetApp.flush();
 }
