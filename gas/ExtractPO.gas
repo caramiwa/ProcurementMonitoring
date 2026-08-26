@@ -9,14 +9,15 @@ function ExtractPO() {
   if (!sourceSheet) throw new Error(`Source sheet not found: ${sourceSheetName}`);
   if (!targetSheet) throw new Error(`Target sheet not found: ${targetSheetName}`);
 
-  // TARGET PO 2026 ← SOURCE PO Master 2026
+  // TARGET Current PO ← SOURCE Current PO Master
   // One record per unique PO. ITEM DESCRIPTION is intentionally excluded.
+  // The left side is the TARGET column; the right side is the SOURCE column.
   const columnMapping = {
     'DATE PREPARED': 'DATE PREPARED',
     'CAF NO.': 'CAF NO.',
     'PO. NO.': 'PO. NO.',
     'PROJECT TITLE': 'PROJECT TITLE',
-    'AMOUNT': 'PO TOTAL COST',
+    'AMOUNT': 'AMOUNT',
     'PR NO.': 'PR NO.',
     'END-USER': 'END-USER',
     'SUPPLIER': 'SUPPLIER',
@@ -32,12 +33,12 @@ function ExtractPO() {
 
   const sourceData = sourceSheet.getDataRange().getValues();
   if (sourceData.length < 2) {
-    Logger.log('PO Master 2026 contains no data rows.');
+    Logger.log('Current PO Master contains no data rows.');
     return;
   }
 
   const targetData = targetSheet.getDataRange().getValues();
-  if (targetData.length < 1) throw new Error('PO 2026 has no header row.');
+  if (targetData.length < 1) throw new Error('Current PO has no header row.');
 
   const sourceHeader = sourceData[0];
   const sourceRows = sourceData.slice(1);
@@ -67,8 +68,7 @@ function ExtractPO() {
     throw new Error(`${targetSheetName} missing target columns: ${missingTarget.join(', ')}`);
   }
 
-  // Group the detailed PO Master rows by PO NO.
-  // PO Master is the detailed item-level dataset, so ExtractPO no longer reads Data List.
+  // Group detailed Current PO Master rows by PO NO.
   const poGroups = new Map();
 
   sourceRows.forEach(row => {
@@ -81,8 +81,8 @@ function ExtractPO() {
   });
 
   // Build one PO-level record per PO.
-  // AMOUNT is the sum of PO TOTAL COST across all detailed rows belonging to the PO.
-  const buildPOMasterRow = rows => {
+  // AMOUNT is summed across all detailed rows belonging to the PO.
+  const buildPORow = rows => {
     const targetRow = Array(targetHeader.length).fill('');
 
     mappedColumns.forEach(({targetColName, sourceIndex, targetIndex}) => {
@@ -109,9 +109,9 @@ function ExtractPO() {
     return targetRow;
   };
 
-  const outputRows = [...poGroups.values()].map(buildPOMasterRow);
+  const outputRows = [...poGroups.values()].map(buildPORow);
 
-  // Index existing PO 2026 rows by PO NO. for updates.
+  // Index existing Current PO records by PO NO. for updates.
   const targetRowByPO = new Map();
   targetRows.forEach((row, i) => {
     const poRaw = row[targetPoCol];
@@ -119,8 +119,6 @@ function ExtractPO() {
     targetRowByPO.set(String(poRaw).trim().toUpperCase(), i + 2);
   });
 
-  // Prepare all changes in memory first. This avoids thousands of individual
-  // spreadsheet writes and makes the extraction substantially faster.
   const rowsToUpdate = [];
   const rowsToAppend = [];
 
@@ -135,14 +133,12 @@ function ExtractPO() {
     }
   });
 
-  // Update existing rows in batches by writing contiguous ranges where possible.
-  // For simplicity and reliability, each update is still limited to the actual row,
-  // while all new rows are written in one batch below.
+  // Update existing records.
   rowsToUpdate.forEach(({rowNumber, rowData}) => {
     targetSheet.getRange(rowNumber, 1, 1, targetHeader.length).setValues([rowData]);
   });
 
-  // Fill existing blank rows before adding new sheet rows.
+  // Populate available blank rows first.
   const availableRows = [];
   for (let i = 0; i < targetRows.length; i++) {
     const poValue = targetRows[i][targetPoCol];
@@ -166,13 +162,13 @@ function ExtractPO() {
     targetSheet.getRange(startRow, 1, remainingRows.length, targetHeader.length).setValues(remainingRows);
   }
 
-  Logger.log('PO Master 2026 → PO 2026 aggregation complete.');
-  Logger.log(`Source PO Master 2026 rows: ${sourceRows.length}`);
+  Logger.log('Current PO Master → Current PO aggregation complete.');
+  Logger.log(`Source Current PO Master rows: ${sourceRows.length}`);
   Logger.log(`Unique POs found: ${poGroups.size}`);
   Logger.log(`Rows updated successfully: ${rowsToUpdate.length}`);
   Logger.log(`Rows appended successfully: ${rowsToAppend.length}`);
-  Logger.log('ITEM DESCRIPTION is excluded from PO 2026.');
-  Logger.log('PO TOTAL COST is summed across all detailed PO Master rows belonging to each PO.');
+  Logger.log('ITEM DESCRIPTION is excluded from Current PO.');
+  Logger.log('AMOUNT is summed across all detailed Current PO Master rows belonging to each PO.');
 
   SpreadsheetApp.flush();
 }
