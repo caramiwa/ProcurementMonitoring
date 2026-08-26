@@ -44,15 +44,16 @@ function ExtractPOMaster() {
   const sourceHeader = sourceData[0];
   const sourceRows = sourceData.slice(1);
   const targetHeader = targetData[0];
-  const targetRows = targetData.slice(1);
 
   const sourcePoCol = getColIndex(sourceHeader, 'PO NO.');
   const targetPoCol = getColIndex(targetHeader, 'PO. NO.');
   const targetItemCol = getColIndex(targetHeader, 'ITEM DESCRIPTION');
+  const targetIdCol = getColIndex(targetHeader, 'PO ITEM ID');
 
   if (sourcePoCol === -1) throw new Error('Data List: PO NO. column was not found.');
   if (targetPoCol === -1) throw new Error('Current PO Master: PO. NO. column was not found.');
   if (targetItemCol === -1) throw new Error('Current PO Master: ITEM DESCRIPTION column was not found.');
+  if (targetIdCol === -1) throw new Error('Current PO Master: PO ITEM ID column was not found.');
 
   const mappedColumns = Object.entries(columnMapping).map(([targetColName, sourceColName]) => ({
     targetColName,
@@ -75,52 +76,28 @@ function ExtractPOMaster() {
   const sourceRowsWithoutPO = sourceRows.length - sourceRowsWithPO.length;
 
   // Build detailed output rows entirely in memory.
+  // PO ITEM ID is generated here and is never written back to Data List.
+  const occurrenceByPO = new Map();
+
   const desiredRows = sourceRowsWithPO.map(sourceRow => {
+    const po = normalize(sourceRow[sourcePoCol]);
+    const poKey = normalizeKey(po);
+    const occurrence = (occurrenceByPO.get(poKey) || 0) + 1;
+    occurrenceByPO.set(poKey, occurrence);
+
+    const poItemId = `${po}-${String(occurrence).padStart(3, '0')}`;
     const targetRow = Array(targetHeader.length).fill('');
+
     mappedColumns.forEach(({sourceIndex, targetIndex}) => {
       targetRow[targetIndex] = sourceRow[sourceIndex];
     });
+
+    targetRow[targetIdCol] = poItemId;
     return targetRow;
   });
 
-  // Existing records are identified by PO NO. + ITEM DESCRIPTION + occurrence.
-  // This preserves duplicate item descriptions within the same PO.
-  const existingByKey = new Map();
-  targetRows.forEach((row, index) => {
-    const po = normalize(row[targetPoCol]);
-    if (!po) return;
-
-    const item = normalize(row[targetItemCol]);
-    const key = `${normalizeKey(po)}||${normalizeKey(item)}`;
-
-    if (!existingByKey.has(key)) existingByKey.set(key, []);
-    existingByKey.get(key).push(index + 2);
-  });
-
-  const occurrenceByKey = new Map();
-  const rowsToUpdate = [];
-  const rowsToAppend = [];
-
-  desiredRows.forEach(rowData => {
-    const po = normalize(rowData[targetPoCol]);
-    const item = normalize(rowData[targetItemCol]);
-    const key = `${normalizeKey(po)}||${normalizeKey(item)}`;
-    const occurrence = occurrenceByKey.get(key) || 0;
-    occurrenceByKey.set(key, occurrence + 1);
-
-    const matchingRows = existingByKey.get(key) || [];
-    const existingRowNumber = matchingRows[occurrence];
-
-    if (existingRowNumber) {
-      rowsToUpdate.push({ rowNumber: existingRowNumber, rowData });
-    } else {
-      rowsToAppend.push(rowData);
-    }
-  });
-
-  // Populate/update the target using batch writes wherever possible.
-  // We rebuild the detailed data area in source order. This avoids thousands of
-  // individual getRange()/setValues() calls while leaving the header untouched.
+  // Replace the generated data area in one batch.
+  // Data List remains completely untouched.
   const outputStartRow = 2;
   const requiredLastRow = outputStartRow + desiredRows.length - 1;
 
@@ -131,7 +108,6 @@ function ExtractPOMaster() {
     );
   }
 
-  // Clear only the existing data area, never the header row.
   const existingDataRowCount = Math.max(targetSheet.getLastRow() - 1, 0);
   if (existingDataRowCount > 0) {
     targetSheet.getRange(2, 1, existingDataRowCount, targetHeader.length).clearContent();
@@ -142,12 +118,10 @@ function ExtractPOMaster() {
       .setValues(desiredRows);
   }
 
-  // Remove stale rows below the newly generated dataset when possible.
-  const rowsToDelete = targetSheet.getMaxRows() - requiredLastRow;
-  if (desiredRows.length > 0 && rowsToDelete > 0 && targetSheet.getMaxRows() > requiredLastRow) {
-    // Do not delete the sheet below the generated range if it contains extra reserved rows;
-    // clear them instead so future runs remain safe and predictable.
-    targetSheet.getRange(requiredLastRow + 1, 1, rowsToDelete, targetHeader.length).clearContent();
+  // Clear stale generated rows below the current output without touching the header.
+  const rowsToClear = targetSheet.getMaxRows() - requiredLastRow;
+  if (desiredRows.length > 0 && rowsToClear > 0) {
+    targetSheet.getRange(requiredLastRow + 1, 1, rowsToClear, targetHeader.length).clearContent();
   }
 
   Logger.log('Data List → Current PO Master detailed extraction complete.');
@@ -155,10 +129,10 @@ function ExtractPOMaster() {
   Logger.log(`Source rows with PO NO.: ${sourceRowsWithPO.length}`);
   Logger.log(`Source rows without PO NO. (skipped): ${sourceRowsWithoutPO}`);
   Logger.log(`Current PO Master rows populated: ${desiredRows.length}`);
-  Logger.log(`Existing records matched: ${rowsToUpdate.length}`);
-  Logger.log(`New records available: ${rowsToAppend.length}`);
+  Logger.log(`PO ITEM IDs generated: ${desiredRows.length}`);
   Logger.log('ITEM DESCRIPTION and CATEGORY are preserved in Current PO Master.');
   Logger.log('No grouping or PO TOTAL COST aggregation is performed.');
+  Logger.log('PO ITEM ID is generated only in Current PO Master; Data List is read-only.');
 
   SpreadsheetApp.flush();
 }
