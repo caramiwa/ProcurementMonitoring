@@ -1,6 +1,6 @@
 function ExtractPO() {
-  const sourceSheetName = 'PO Master 2026';
-  const targetSheetName = 'PO 2026';
+  const sourceSheetName = 'Current PO Master';
+  const targetSheetName = 'Current PO';
 
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   const sourceSheet = ss.getSheetByName(sourceSheetName);
