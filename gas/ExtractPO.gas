@@ -28,8 +28,10 @@ function ExtractPO() {
     'CATEGORY': 'CATEGORY'
   };
 
+  const normalize = value => String(value ?? '').trim();
+  const normalizeKey = value => normalize(value).toUpperCase();
   const getColIndex = (headers, name) =>
-    headers.findIndex(h => h != null && String(h).trim().toUpperCase() === name.trim().toUpperCase());
+    headers.findIndex(h => normalizeKey(h) === normalizeKey(name));
 
   const sourceData = sourceSheet.getDataRange().getValues();
   if (sourceData.length < 2) {
@@ -73,9 +75,9 @@ function ExtractPO() {
 
   sourceRows.forEach(row => {
     const poRaw = row[sourcePoCol];
-    if (poRaw === '' || poRaw == null || String(poRaw).trim() === '') return;
+    if (normalize(poRaw) === '') return;
 
-    const poKey = String(poRaw).trim().toUpperCase();
+    const poKey = normalizeKey(poRaw);
     if (!poGroups.has(poKey)) poGroups.set(poKey, []);
     poGroups.get(poKey).push(row);
   });
@@ -94,6 +96,14 @@ function ExtractPO() {
           const cleaned = String(value ?? '').replace(/[^0-9.-]/g, '');
           return sum + (cleaned ? parseFloat(cleaned) || 0 : 0);
         }, 0);
+      } else if (targetColName === 'DATE PREPARED') {
+        // Keep DATE PREPARED as a real spreadsheet Date value.
+        // Do not convert it to String(), which produces the long JavaScript
+        // representation such as "Fri Mar 13 2026 15:00:00 GMT+0800...".
+        const dateValue = rows.find(row => row[sourceIndex] instanceof Date)?.[sourceIndex];
+        targetRow[targetIndex] = dateValue instanceof Date
+          ? dateValue
+          : (rows[0][sourceIndex] || '');
       } else {
         const uniqueValues = [...new Set(
           rows
@@ -115,15 +125,15 @@ function ExtractPO() {
   const targetRowByPO = new Map();
   targetRows.forEach((row, i) => {
     const poRaw = row[targetPoCol];
-    if (poRaw === '' || poRaw == null || String(poRaw).trim() === '') return;
-    targetRowByPO.set(String(poRaw).trim().toUpperCase(), i + 2);
+    if (normalize(poRaw) === '') return;
+    targetRowByPO.set(normalizeKey(poRaw), i + 2);
   });
 
   const rowsToUpdate = [];
   const rowsToAppend = [];
 
   outputRows.forEach(rowData => {
-    const poKey = String(rowData[targetPoCol]).trim().toUpperCase();
+    const poKey = normalizeKey(rowData[targetPoCol]);
     const existingRowNumber = targetRowByPO.get(poKey);
 
     if (existingRowNumber) {
@@ -142,9 +152,7 @@ function ExtractPO() {
   const availableRows = [];
   for (let i = 0; i < targetRows.length; i++) {
     const poValue = targetRows[i][targetPoCol];
-    if (poValue === '' || poValue == null || String(poValue).trim() === '') {
-      availableRows.push(i + 2);
-    }
+    if (normalize(poValue) === '') availableRows.push(i + 2);
   }
 
   const rowsForBlankSlots = Math.min(rowsToAppend.length, availableRows.length);
@@ -162,6 +170,17 @@ function ExtractPO() {
     targetSheet.getRange(startRow, 1, remainingRows.length, targetHeader.length).setValues(remainingRows);
   }
 
+  // Apply the existing DATE PREPARED number format from the target sheet.
+  const dateTargetIndex = getColIndex(targetHeader, 'DATE PREPARED');
+  if (dateTargetIndex !== -1 && outputRows.length > 0 && targetSheet.getMaxRows() >= 2) {
+    const dateFormat = targetSheet.getRange(2, dateTargetIndex + 1).getNumberFormat();
+    if (dateFormat) {
+      targetSheet
+        .getRange(2, dateTargetIndex + 1, outputRows.length, 1)
+        .setNumberFormat(dateFormat);
+    }
+  }
+
   Logger.log('Current PO Master → Current PO aggregation complete.');
   Logger.log(`Source Current PO Master rows: ${sourceRows.length}`);
   Logger.log(`Unique POs found: ${poGroups.size}`);
@@ -169,6 +188,7 @@ function ExtractPO() {
   Logger.log(`Rows appended successfully: ${rowsToAppend.length}`);
   Logger.log('ITEM DESCRIPTION is excluded from Current PO.');
   Logger.log('AMOUNT is summed across all detailed Current PO Master rows belonging to each PO.');
+  Logger.log('DATE PREPARED is preserved as a spreadsheet date value.');
 
   SpreadsheetApp.flush();
 }
